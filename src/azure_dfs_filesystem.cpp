@@ -52,43 +52,50 @@ static void Walk(const Azure::Storage::Files::DataLake::DataLakeFileSystemClient
 	}
 
 	Azure::Storage::Files::DataLake::ListPathsOptions options;
-	while (true) {
-		auto res = directory_client.ListPaths(recursive, options);
+	try {
+		while (true) {
+			auto res = directory_client.ListPaths(recursive, options);
 
-		for (const auto &elt : res.Paths) {
-			if (elt.IsDirectory) {
-				if (!recursive) { // Only perform recursive call if we are not already processing recursive result
-					if (Glob(elt.Name.data(), elt.Name.length(), path_pattern.data(), end_match)) {
-						if (end_match >= path_pattern.length()) {
-							// Skip, no way there will be matches anymore
-							continue;
+			for (const auto &elt : res.Paths) {
+				if (elt.IsDirectory) {
+					if (!recursive) { // Only perform recursive call if we are not already processing recursive result
+						if (Glob(elt.Name.data(), elt.Name.length(), path_pattern.data(), end_match)) {
+							if (end_match >= path_pattern.length()) {
+								// Skip, no way there will be matches anymore
+								continue;
+							}
+							Walk(fs, elt.Name, path_pattern,
+							     std::min(path_pattern.length(), path_pattern.find('/', end_match + 1)), out_result);
 						}
-						Walk(fs, elt.Name, path_pattern,
-						     std::min(path_pattern.length(), path_pattern.find('/', end_match + 1)), out_result);
 					}
-				}
-			} else {
-				// File
-				if (Glob(elt.Name.data(), elt.Name.length(), path_pattern.data(), path_pattern.length())) {
-					OpenFileInfo info(elt.Name);
-					info.extended_info = make_shared_ptr<ExtendedOpenFileInfo>();
-					auto &options = info.extended_info->options;
-					options.emplace("file_size", Value::BIGINT(elt.FileSize));
-					options.emplace("last_modified",
-					                Value::TIMESTAMP(AzureStorageFileSystem::ToTimestamp(elt.LastModified)));
-					auto etag = AzureStorageFileSystem::StripETagQuotes(elt.ETag);
-					if (!etag.empty()) {
-						options.emplace("etag", Value(std::move(etag)));
+				} else {
+					// File
+					if (Glob(elt.Name.data(), elt.Name.length(), path_pattern.data(), path_pattern.length())) {
+						OpenFileInfo info(elt.Name);
+						info.extended_info = make_shared_ptr<ExtendedOpenFileInfo>();
+						auto &options = info.extended_info->options;
+						options.emplace("file_size", Value::BIGINT(elt.FileSize));
+						options.emplace("last_modified",
+						                Value::TIMESTAMP(AzureStorageFileSystem::ToTimestamp(elt.LastModified)));
+						auto etag = AzureStorageFileSystem::StripETagQuotes(elt.ETag);
+						if (!etag.empty()) {
+							options.emplace("etag", Value(std::move(etag)));
+						}
+						out_result->push_back(info);
 					}
-					out_result->push_back(info);
 				}
 			}
-		}
 
-		if (res.NextPageToken) {
-			options.ContinuationToken = res.NextPageToken;
-		} else {
-			break;
+			if (res.NextPageToken) {
+				options.ContinuationToken = res.NextPageToken;
+			} else {
+				break;
+			}
+		}
+	} catch (const Azure::Storage::StorageException &e) {
+		// A directory that does not exist has no matches (the blob filesystem returns none too)
+		if (e.StatusCode != Azure::Core::Http::HttpStatusCode::NotFound) {
+			throw;
 		}
 	}
 }
